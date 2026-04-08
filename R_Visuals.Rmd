@@ -14,7 +14,7 @@ library(lubridate)
 
 ```{r}
 stockfish = read.csv("lichess_stockfish_sample.csv")
-nofish = read.csv("lichess_nofish_sample.csv")
+# nofish = read.csv("lichess_nofish_sample.csv")
 ```
 
 ```{r}
