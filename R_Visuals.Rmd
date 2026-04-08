@@ -1,0 +1,325 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library("jsonlite")
+library("ggplot2")
+library(tidyr)
+library(dplyr)
+library(lubridate)
+```
+
+```{r}
+stockfish = read.csv("lichess_stockfish_sample.csv")
+nofish = read.csv("lichess_nofish_sample.csv")
+```
+
+```{r}
+summary(stockfish)
+```
+
+```{r}
+game = stockfish[3, 'moves']
+
+# Extract the eval and movetime columns as a vector
+df = fromJSON(game)
+
+eval_vector = df$eval
+
+clk_vector = df$clk
+
+print(eval_vector)
+print(clk_vector)
+```
+Before we go any further, let's define how we'll interpret the change in evaluations from move to move. 
+First off: any change is more significant when the evaluation is closer to 0. 
+i.e. an eval going from +0 to +3 is more significant than +3 to +6, which is much more significant than +12 to +15.
+Secondly, a shift in eval is considered equal magnitude regardless of the direction, i.e. +3 to +6 will be considerd identical in magnitude to +6 to +3
+I will interpret MN (Math in n) or # as +20 / -20 for simplicity.
+This metric I will call 'Adjusted Eval Delta'; for this I will use a logistic function to calculate an adjusted evaluation and calculate the differences:
+$$ \frac{20}{1+e^{-0.25x}}\ -10 $$
+From here I will take the absolute value of the difference to evaluate the quality of moves.
+
+```{r}
+convert_mate = function(x) {
+  # If it doesn't contain '#', it's a normal centipawn evaluation
+  if (!grepl("#", x)) {
+    return(as.numeric(x))
+  }
+  
+  if (grepl("-m", x)) {
+    return (-20)
+  } else {
+    return (20)
+  }
+}
+
+# Apply to vector
+adjusted_eval = as.numeric(sapply(eval_vector, convert_mate))
+adjusted_eval = adjusted_eval[!is.na(adjusted_eval)]
+print(adjusted_eval)
+
+
+```
+
+```{r}
+
+eval_logi = function(n){
+  return (20 * plogis(0.25 * n) - 10)
+}
+
+ggplot(data.frame(x=c(-20, 20)), aes(x=x)) + 
+  stat_function(fun=eval_logi)
+
+#Take the change in evaluation per move
+reg_diffs = diff(adjusted_eval)
+adj_diffs = diff(eval_logi(adjusted_eval))
+
+plot(reg_diffs, type = "o", cex = 0.5, col = "blue", xlab = "move number", ylab = "eval difference" ,ylim = c(-10, 20))
+lines(adj_diffs, type = "o", cex = 0.5,  col = "red")
+lines(adjusted_eval[-1], type = "o", cex = 0.5,  col = "green")
+legend("topleft", legend = c("Regular Diffs", "Adjusted Diffs", "Evaluation"), 
+       col = c("blue", "red", "green"),  lty = 1, pch = 1)
+```
+Now with this metric, the change of evaluation per move can be analyzed more precisely in regards to the actual affect on the outcome of the game. 
+
+```{r}
+mean(adj_diffs)
+median(adj_diffs)
+max(adj_diffs)
+var(adj_diffs)
+```
+
+With this tool, we now can take aggregate functions over the entire dataset. To streamline this process, we add columns to the stockfish table containing the important per-game information.
+
+```{r echo=FALSE, warning=FALSE}
+
+means = NULL
+medians = NULL
+maxes = NULL
+vars = NULL
+
+for(i in 1:nrow(stockfish)){
+  game = stockfish[i,'moves']
+  
+  df = fromJSON(game)
+  eval = df$eval 
+  
+  transformed = eval |> 
+    sapply(convert_mate) |>
+    as.numeric() |>
+    na.omit() |>
+    eval_logi() |>
+    diff() |>
+    abs()
+    
+  
+  means[i] = mean(transformed)
+  medians[i] = median(transformed)
+  maxes [i] = max(transformed)
+  vars[i] = var(transformed)
+  
+}
+
+stockfish$means = means
+stockfish$medians = medians
+stockfish$maxes = maxes
+stockfish$vars = vars
+
+stockfish$ratingdelta = abs(stockfish$white_elo - stockfish$black_elo)
+stockfish$ratingavg = (stockfish$white_elo + stockfish$black_elo) / 2
+
+```
+
+```{r}
+rating_groups <- stockfish %>%
+  mutate(rating_bins = cut(ratingavg, 
+                          breaks = seq(500, 3200, by = 900), 
+                          include.lowest = TRUE, 
+                          right = FALSE))
+
+
+ggplot(rating_groups, aes(x = ratingdelta, y = vars, color = rating_bins)) +
+  geom_point(alpha = 0.4, size = 1) +
+  # Create separate visualizations for each 500-elo interval
+  facet_wrap(~ rating_bins) + 
+  # Trend line
+  geom_smooth(method = "lm", color = "black", se = FALSE, linewidth = 0.5) +
+  labs(
+    title = "Eval Variance vs. Rating Difference by Elo Bracket",
+    x = "Rating Difference",
+    y = "Eval Variance" ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+```
+
+```{r}
+ggplot(rating_groups, aes(x = ratingdelta, y = means, color = rating_bins)) +
+  geom_point(alpha = 0.4, size = 1) +
+  facet_wrap(~ rating_bins) + 
+  geom_smooth(method = "lm", color = "black", se = FALSE, linewidth = 0.5) +
+  labs(
+    title = "Mean Eval Change vs. Rating Difference by Elo Bracket",
+    x = "Rating Difference",
+    y = "Mean Eval Change" ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+
+```{r}
+ggplot(rating_groups, aes(x = ratingdelta, y = medians, color = rating_bins)) +
+  geom_point(alpha = 0.4, size = 1) +
+  facet_wrap(~ rating_bins) + 
+  geom_smooth(method = "lm", color = "black", se = FALSE, linewidth = 0.5) +
+  labs(
+    title = "Median Eval Change vs. Rating Difference by Elo Bracket",
+    x = "Rating Difference",
+    y = "Median Eval Change" ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+
+```{r}
+ggplot(rating_groups, aes(x = ratingdelta, y = maxes, color = rating_bins)) +
+  geom_point(alpha = 0.4, size = 1) +
+  facet_wrap(~ rating_bins) + 
+  geom_smooth(method = "lm", color = "black", se = FALSE, linewidth = 0.5) +
+  labs(
+    title = "Max Eval Change vs. Rating Difference by Elo Bracket",
+    x = "Rating Difference",
+    y = "Max Eval Change" ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+```{r}
+rating_groups |> count(rating_bins)
+```
+
+
+
+
+
+```{r}
+
+for(i in 1:nrow(stockfish)){
+  game = stockfish[i,'moves']
+  
+  df = fromJSON(game)
+  eval = df$eval 
+  clk = period_to_seconds(hms(df$clk)) 
+  
+  transformed = eval |> 
+    sapply(convert_mate) |>
+    as.numeric() |>
+    na.omit() |>
+    diff() |>
+    eval_logi()
+}
+```
+
+```{r echo=FALSE, warning=FALSE}
+
+columns = c("eval_change", "timespent", "rating_average", "ratingdelta", "time_control")
+time_accuracy = data.frame(matrix(ncol = length(columns), nrow = 0))
+colnames(time_accuracy) = columns
+
+for(i in 1:nrow(stockfish)){
+  game = stockfish[i,'moves']
+  
+  df = fromJSON(game)
+  eval = df$eval 
+  clk = period_to_seconds(hms(df$clk)) 
+  
+  transformed = eval |> 
+    sapply(convert_mate) |>
+    as.numeric() |>
+    na.omit() |>
+    eval_logi() |>
+    diff() |>
+    abs()
+
+  timespent = diff(clk, lag = 2) * -1 
+  
+  #add these games to time_accuracy table:
+  
+  length(timespent) <- length(transformed) - 1
+  
+  temp = data.frame(eval_change = transformed[-1],
+                    timespent = timespent, 
+                    rating_average = stockfish[i, 'ratingavg'],
+                    ratingdelta = abs(stockfish[i, 'ratingdelta']),
+                    time_control = stockfish[i, 'time_control'])
+  time_accuracy = rbind(time_accuracy, temp)
+}
+
+
+```
+
+```{r}
+unique(time_accuracy$time_control)
+```
+To normalize time controls, we will follow the standard of:
+10+ minutes of time is rapid
+3-10 minutes of time is blitz
+Lower than 3 minutes is buillet
+And total time is calculated by starting time + 40 * increment
+
+```{r}
+#Normalize time increment for analysis
+
+for(i in 1:nrow(time_accuracy)){
+  s = time_accuracy[i, 'time_control']
+  
+  #Calculate time format
+  if(grepl('+', s, fixed = TRUE)){
+    parts = as.numeric(unlist(strsplit(s, "\\+")))
+    a = as.numeric(parts[1])
+    b = as.numeric(parts[2])
+    time = a + 40 * b
+      
+    if(time > 600) time_accuracy[i, 'time_control'] = "Rapid"
+  
+    else if(time > 180) time_accuracy[i, 'time_control'] = "Blitz"
+  
+    else time_accuracy[i, 'time_control'] = "Bullet"
+  }
+  
+}
+```
+
+```{r}
+#clean the data: remove NA and negative values for time spent
+time_accuracy = time_accuracy |> filter(timespent >= 0)
+
+```
+
+```{r}
+ggplot(time_accuracy, aes(x = timespent, y = eval_change, color = rating_average)) +
+  geom_point(alpha = 0.4, size = 1) +
+  scale_color_viridis_c() + 
+  geom_smooth(method = "lm", color = "black", se = FALSE, linewidth = 0.5) +
+  theme_minimal() +
+  labs(color = "Average Rating")
+```
+
+```{r fig.height=6, fig.width=15}
+ggplot(time_accuracy, aes(x = timespent, y = eval_change)) +
+  facet_wrap(~ time_control, ncol = 3) +
+  geom_bin2d(bins = 70) +
+  scale_fill_viridis_c(trans = "log10") + 
+  labs(
+    fill = "log10(count)",
+    title = "Evaluation Change by Time Spent",
+    x = "Time Spent",
+    y = "Eval Change") +
+  theme_minimal()
+```
+
+
